@@ -1,16 +1,18 @@
 package main
 
 import (
-	"fmt"
-	"net"
 	"bytes"
+	"crypto/md5"
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"io"
+	"net"
 )
 
 const (
-	host = "localhost"
-	port = "5433"
+	host     = "localhost"
+	port     = "5433"
 	username = "mislavsu"
 	database = "postgres"
 	password = "postgres"
@@ -27,13 +29,22 @@ func main() {
 	defer conn.Close()
 
 	fmt.Printf("%s %s\n", conn.LocalAddr(), conn.RemoteAddr())
-	
+
 	//write bytes to the remote server
 	err = send_startup_message(conn, username, database)
 	if err != nil {
 		fmt.Println(err)
 		panic(err)
 	}
+
+	fmt.Println("Starting auth...")
+	err = handleAuthentication(conn, username, password)
+	if err != nil {
+		//panic(err)
+		fmt.Println("PANIC")
+		fmt.Println(err)
+	}
+
 	fmt.Println("[Main] Starting waitForReady loop...")
 	waitForReady(conn)
 }
@@ -41,14 +52,17 @@ func main() {
 func waitForReady(conn net.Conn) {
 	for {
 		msgType := readByte(conn)
+		converted := string(msgType)
+		fmt.Println(converted)
 		length := readInt32(conn)
 		switch msgType {
-			case 'Z':
-				_ = readByte(conn) //transaction status
-				fmt.Println("[waitForReady] ReadtForQuery received")
-				return
-			default:
-				skipN(conn, length-4)
+		case 'Z':
+			_ = readByte(conn) //transaction status
+			fmt.Println("[waitForReady] ReadtForQuery received")
+			return
+		default:
+			skipN(conn, length-4)
+			fmt.Println("Found default message type.")
 		}
 	}
 }
@@ -57,12 +71,12 @@ func send_startup_message(conn net.Conn, user, db string) error {
 	buf := new(bytes.Buffer)
 	//protocol version number 3.0 - 196608
 	binary.Write(buf, binary.BigEndian, int32(196608))
-	
+
 	writeCString(buf, "user")
-	writeCString(buf, username)
+	writeCString(buf, user)
 
 	writeCString(buf, "database")
-	writeCString(buf, database)
+	writeCString(buf, db)
 
 	buf.WriteByte(0)
 
@@ -73,7 +87,7 @@ func send_startup_message(conn net.Conn, user, db string) error {
 
 	response, err := conn.Write(final.Bytes())
 	fmt.Println("[StartUp] Server response: ")
-	fmt.Println(response)
+	fmt.Println(string(response))
 	return err
 }
 
@@ -86,6 +100,58 @@ func readInt32(conn net.Conn) int32 {
 func writeCString(buf *bytes.Buffer, s string) {
 	buf.WriteString(s)
 	buf.WriteByte(0)
+}
+
+func handleAuthentication(conn net.Conn, user, pass string) error {
+	for {
+		msgType := readByte(conn)
+		//length := readInt32(conn)
+		fmt.Print("Message type:")
+		fmt.Println(msgType)
+		switch msgType {
+		case 'R': //authentication
+			authType := readInt32(conn)
+			switch authType {
+			case 0: //OK
+				fmt.Println("auth successfull")
+				return nil
+			case 5:
+				salt := make([]byte, 4)
+				io.ReadFull(conn, salt)
+				hash := md5HashPassword(user, pass, salt)
+				sendPasswordMessage(conn, hash)
+			default:
+				return fmt.Errorf("unsupported auth method: %d", authType)
+			}
+		default:
+			return fmt.Errorf("unexpected message type during auth: %c", msgType)
+		}
+	}
+}
+
+func sendPasswordMessage(conn net.Conn, hashed string) {
+	buf := new(bytes.Buffer)
+	writeCString(buf, hashed)
+	msg := buf.Bytes()
+
+	packet := new(bytes.Buffer)
+	packet.WriteByte('p')
+	binary.Write(packet, binary.BigEndian, int32(len(msg)+4))
+	packet.Write(msg)
+
+	conn.Write(packet.Bytes())
+}
+
+func md5HashPassword(user, pass string, salt []byte) string {
+	h1 := md5.Sum([]byte(pass + user))
+	h1Hex := fmt.Sprintf("%x", h1[:])
+
+	h2 := md5.New()
+	h2.Write([]byte(h1Hex))
+	h2.Write(salt)
+	sum := h2.Sum(nil)
+
+	return "md5" + hex.EncodeToString(sum)
 }
 
 func readByte(conn net.Conn) byte {
