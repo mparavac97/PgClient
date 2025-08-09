@@ -10,6 +10,16 @@ import (
 	"net"
 )
 
+type RowDescription struct {
+	fieldName             string
+	tableObjectId         int32
+	attributeNumber       int16
+	fieldDataTypeObjectId int32
+	dataTypeSize          int16
+	typeModifier          int32
+	formatCode            int16
+}
+
 const (
 	host     = "localhost"
 	port     = "5433"
@@ -57,6 +67,48 @@ func readQueryResponse(conn net.Conn) {
 		length := readInt32(conn)
 		fmt.Printf("[ReadQueryResponse] Length of the message: %d\n", length)
 		switch msgType {
+		case 'T':
+			fmt.Printf("[ReadQueryResponse] Recevied RowDescription message.\n")
+			noOfFields := readInt16(conn)
+			fmt.Printf("no of fileds: %d\n\n\n", noOfFields)
+			fields := make([]RowDescription, noOfFields)
+
+			i := 0
+			for i < int(noOfFields) {
+				row := new(RowDescription)
+
+				fieldName, _ := readCString(conn)
+				row.fieldName = fieldName
+				fmt.Printf("[RowDescription] Field name: %s\n", row.fieldName)
+				row.tableObjectId = readInt32(conn)
+				row.attributeNumber = readInt16(conn)
+				row.fieldDataTypeObjectId = readInt32(conn)
+				row.dataTypeSize = readInt16(conn)
+				row.typeModifier = readInt32(conn)
+				row.formatCode = readInt16(conn)
+
+				fields = append(fields, *row)
+				i++
+			}
+			fmt.Println(fields)
+		case 'D':
+			noOfFields := readInt16(conn)
+
+			i := 0
+			for i < int(noOfFields) {
+				valueLength := readInt32(conn)
+				if valueLength < 0 { //-1 indicates a NULL column value
+
+				}	
+				else {
+
+				
+
+				value := readNBytes(conn, int(valueLength))
+				value = nil	
+			}
+				i++
+			}
 		case 'E':
 			code := string(readByte(conn))
 			field, _ := readCString(conn)
@@ -66,7 +118,7 @@ func readQueryResponse(conn net.Conn) {
 }
 
 func sendQuery(conn net.Conn) {
-	query := "SELECT 1;"
+	query := "SELECT 1 as AgencyId, 2 as UserId;"
 
 	buf := new(bytes.Buffer)
 	//writeCString(buf, "Q")
@@ -147,10 +199,22 @@ func send_startup_message(conn net.Conn, user, db string) error {
 	return err
 }
 
+func readInt16(conn net.Conn) int16 {
+	var b [2]byte
+	io.ReadFull(conn, b[:])
+	return int16(binary.BigEndian.Uint16(b[:]))
+}
+
 func readInt32(conn net.Conn) int32 {
 	var b [4]byte
 	io.ReadFull(conn, b[:])
 	return int32(binary.BigEndian.Uint32(b[:]))
+}
+
+func readNBytes(conn net.Conn, n int) []byte {
+	b := make([]byte, n)
+	io.ReadFull(conn, b[:])
+	return b
 }
 
 func writeCString(buf *bytes.Buffer, s string) {
