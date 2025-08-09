@@ -13,7 +13,7 @@ import (
 const (
 	host     = "localhost"
 	port     = "5433"
-	username = "mislavsu"
+	username = "mislavclient"
 	database = "postgres"
 	password = "postgres"
 )
@@ -37,32 +37,85 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Println("Starting auth...")
-	err = handleAuthentication(conn, username, password)
-	if err != nil {
-		//panic(err)
-		fmt.Println("PANIC")
-		fmt.Println(err)
-	}
+	//fmt.Println("Starting auth...")
+	//err = handleAuthentication(conn, username, password)
+	//if err != nil {
+	//	panic(err)
+	//}
 
 	fmt.Println("[Main] Starting waitForReady loop...")
 	waitForReady(conn)
+
+	sendQuery(conn)
+	readQueryResponse(conn)
 }
 
+func readQueryResponse(conn net.Conn) {
+	for {
+		msgType := readByte(conn)
+		fmt.Printf("[ReadQueryResponse] Received message of type: %s\n", string(msgType))
+		length := readInt32(conn)
+		fmt.Printf("[ReadQueryResponse] Length of the message: %d\n", length)
+		switch msgType {
+		case 'E':
+			code := string(readByte(conn))
+			field, _ := readCString(conn)
+			fmt.Printf("[ReadQueryResponse] Error: %s %s\n", code, field)
+		}
+	}
+}
+
+func sendQuery(conn net.Conn) {
+	query := "SELECT 1;"
+
+	buf := new(bytes.Buffer)
+	//writeCString(buf, "Q")
+	buf.WriteByte('Q')
+
+	binary.Write(buf, binary.BigEndian, int32(len(query)+4+1))
+
+	writeCString(buf, query)
+	//buf.WriteByte(0)
+
+	conn.Write(buf.Bytes())
+}
+
+// this ones should be broken into smaller pieces, probably per message type
 func waitForReady(conn net.Conn) {
 	for {
 		msgType := readByte(conn)
 		converted := string(msgType)
-		fmt.Println(converted)
+		fmt.Printf("[WaitForReady] Server response: %s\n", converted)
 		length := readInt32(conn)
+		fmt.Printf("[WaitForReady] Message length: %d\n", length)
 		switch msgType {
-		case 'Z':
-			_ = readByte(conn) //transaction status
-			fmt.Println("[waitForReady] ReadtForQuery received")
+		case 'Z': //waitForReady
+			status := readByte(conn) //transaction status
+			fmt.Printf("[WaitForReady] ReadyForQuery received - transaction status: %s\n", string(status))
+			return
+		case 'S': //ParameterStatus
+			//should think about storing these values for future use
+			param, err := readCString(conn)
+			if err != nil {
+				panic(err)
+			}
+			fmt.Printf("[waitForReady] Received param status message param: %s\n", param)
+			value, err2 := readCString(conn)
+			if err2 != nil {
+				panic(err2)
+			}
+			fmt.Printf("[WaitForReady] Received param status message value: %s\n", value)
+		case 'K': //BackendKeyData
+			processId := readInt32(conn)
+			fmt.Printf("[WaitForReady] Received backend PID: %d\n", processId)
+			secretKey := readInt32(conn)
+			fmt.Printf("[WaitForReady] Recevied secret key: %d\n", secretKey)
+		case 'E': //error response
+			fmt.Println("[WaitForReady] Server returned error.")
 			return
 		default:
 			skipN(conn, length-4)
-			fmt.Println("Found default message type.")
+			fmt.Println("[WaitForReady] Found default message type.")
 		}
 	}
 }
@@ -77,6 +130,9 @@ func send_startup_message(conn net.Conn, user, db string) error {
 
 	writeCString(buf, "database")
 	writeCString(buf, db)
+
+	writeCString(buf, "application_name")
+	writeCString(buf, "PgClient")
 
 	buf.WriteByte(0)
 
@@ -102,6 +158,24 @@ func writeCString(buf *bytes.Buffer, s string) {
 	buf.WriteByte(0)
 }
 
+// reads byte by byte unitl hitting null terminator
+func readCString(conn net.Conn) (string, error) {
+	var buf bytes.Buffer
+	one := make([]byte, 1)
+
+	for {
+		_, err := conn.Read(one)
+		if err != nil {
+			return "", err
+		}
+		if one[0] == 0 {
+			break
+		}
+		buf.WriteByte(one[0])
+	}
+	return buf.String(), nil
+}
+
 func handleAuthentication(conn net.Conn, user, pass string) error {
 	for {
 		msgType := readByte(conn)
@@ -123,6 +197,8 @@ func handleAuthentication(conn net.Conn, user, pass string) error {
 			default:
 				return fmt.Errorf("unsupported auth method: %d", authType)
 			}
+		case 'E':
+			return fmt.Errorf("error occurred during auth")
 		default:
 			return fmt.Errorf("unexpected message type during auth: %c", msgType)
 		}
