@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -56,11 +57,14 @@ func main() {
 	fmt.Println("[Main] Starting waitForReady loop...")
 	waitForReady(conn)
 
-	sendQuery(conn)
+	query := flag.String("q", "", "SQL query to execute")
+	flag.Parse()
+	sendQuery(conn, *query)
 	readQueryResponse(conn)
 }
 
 func readQueryResponse(conn net.Conn) {
+	fields := make([]RowDescription, 0)
 	for {
 		msgType := readByte(conn)
 		fmt.Printf("[ReadQueryResponse] Received message of type: %s\n", string(msgType))
@@ -71,7 +75,6 @@ func readQueryResponse(conn net.Conn) {
 			fmt.Printf("[ReadQueryResponse] Recevied RowDescription message.\n")
 			noOfFields := readInt16(conn)
 			fmt.Printf("no of fileds: %d\n\n\n", noOfFields)
-			fields := make([]RowDescription, noOfFields)
 
 			i := 0
 			for i < int(noOfFields) {
@@ -79,7 +82,6 @@ func readQueryResponse(conn net.Conn) {
 
 				fieldName, _ := readCString(conn)
 				row.fieldName = fieldName
-				fmt.Printf("[RowDescription] Field name: %s\n", row.fieldName)
 				row.tableObjectId = readInt32(conn)
 				row.attributeNumber = readInt16(conn)
 				row.fieldDataTypeObjectId = readInt32(conn)
@@ -95,20 +97,32 @@ func readQueryResponse(conn net.Conn) {
 			noOfFields := readInt16(conn)
 
 			i := 0
+			data := make(map[string]any)
 			for i < int(noOfFields) {
 				valueLength := readInt32(conn)
 				if valueLength < 0 { //-1 indicates a NULL column value
-
-				}	
-				else {
-
-				
-
-				value := readNBytes(conn, int(valueLength))
-				value = nil	
-			}
+					data[fields[i].fieldName] = nil
+				} else {
+					var value any
+					fmt.Printf("Format code value: %d\n", fields[i].formatCode)
+					if fields[i].formatCode == 0 {
+						//text format
+						valueBytes := readNBytes(conn, int(valueLength))
+						value = string(valueBytes)
+					} else {
+						value = readNBytes(conn, int(valueLength))
+					}
+					//need to know the column type to map the data returned by the server
+					data[fields[i].fieldName] = value
+				}
 				i++
 			}
+			for key, value := range data {
+				fmt.Println("key:", key, "Value:", value)
+			}
+		case 'C':
+			commandTag, _ := readCString(conn)
+			fmt.Printf("[ReadQueryResponse] Recevied following command tag: %s\n", commandTag)
 		case 'E':
 			code := string(readByte(conn))
 			field, _ := readCString(conn)
@@ -117,16 +131,21 @@ func readQueryResponse(conn net.Conn) {
 	}
 }
 
-func sendQuery(conn net.Conn) {
-	query := "SELECT 1 as AgencyId, 2 as UserId;"
+func sendQuery(conn net.Conn, query string) {
+	var q string
+	if query != "" {
+		q = query
+	} else {
+		q = "SELECT '1' as AgencyId, '175' as \"UserId\";"
+	}
 
 	buf := new(bytes.Buffer)
 	//writeCString(buf, "Q")
 	buf.WriteByte('Q')
 
-	binary.Write(buf, binary.BigEndian, int32(len(query)+4+1))
+	binary.Write(buf, binary.BigEndian, int32(len(q)+4+1))
 
-	writeCString(buf, query)
+	writeCString(buf, q)
 	//buf.WriteByte(0)
 
 	conn.Write(buf.Bytes())
