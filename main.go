@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 )
 
 type RowDescription struct {
@@ -21,6 +22,14 @@ type RowDescription struct {
 	formatCode            int16
 }
 
+type ConnectionDetails struct {
+	host     string
+	port     string
+	username string
+	password string
+	database string
+}
+
 const (
 	host     = "localhost"
 	port     = "5433"
@@ -30,7 +39,10 @@ const (
 )
 
 func main() {
-	host_name := host + ":" + string(port)
+
+	connDetails, query := parseArguments()
+
+	host_name := connDetails.host + ":" + string(connDetails.port)
 	fmt.Printf("Starting connection to server(%s)...\n", host_name)
 
 	conn, err := net.Dial("tcp", host_name)
@@ -42,7 +54,7 @@ func main() {
 	fmt.Printf("%s %s\n", conn.LocalAddr(), conn.RemoteAddr())
 
 	//write bytes to the remote server
-	err = send_startup_message(conn, username, database)
+	err = send_startup_message(conn, connDetails.username, connDetails.database)
 	if err != nil {
 		fmt.Println(err)
 		panic(err)
@@ -57,10 +69,51 @@ func main() {
 	fmt.Println("[Main] Starting waitForReady loop...")
 	waitForReady(conn)
 
+	sendQuery(conn, query)
+	readQueryResponse(conn)
+}
+
+func parseArguments() (ConnectionDetails, string) {
+	connStringArgument := flag.String("c", "", "Connection string")
 	query := flag.String("q", "", "SQL query to execute")
 	flag.Parse()
-	sendQuery(conn, *query)
-	readQueryResponse(conn)
+	connDetails := parseConnectionString(*connStringArgument)
+	fmt.Printf("%+v\n", connDetails)
+
+	return connDetails, *query
+}
+
+func parseConnectionString(connString string) ConnectionDetails {
+	fmt.Println(connString)
+	split := strings.Split(connString, ";")
+	fmt.Println(split)
+	details := ConnectionDetails{}
+
+	assignMap := map[string]*string{
+		"host":     &details.host,
+		"port":     &details.port,
+		"username": &details.username,
+		"password": &details.password,
+		"database": &details.database,
+	}
+
+	for _, part := range split {
+		if part == "" {
+			continue
+		}
+		item := strings.SplitN(part, "=", 2)
+		if len(item) != 2 {
+			panic(fmt.Errorf("There was an issue parsing %s", item[0]))
+		}
+		key := strings.ToLower(strings.TrimSpace(item[0]))
+		value := strings.TrimSpace(item[1])
+
+		if ptr, ok := assignMap[key]; ok {
+			*ptr = value
+		}
+	}
+
+	return details
 }
 
 func readQueryResponse(conn net.Conn) {
