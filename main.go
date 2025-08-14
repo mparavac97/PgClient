@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"pgclient/message"
 	"strings"
 )
 
@@ -31,7 +32,7 @@ type ConnectionDetails struct {
 }
 
 const (
-	host     = "localhost"
+	host     = "192.168.0.25"
 	port     = "5433"
 	username = "mislavclient"
 	database = "postgres"
@@ -39,38 +40,47 @@ const (
 )
 
 func main() {
+	connDetails, _ := parseArguments()
 
-	connDetails, query := parseArguments()
-
-	host_name := connDetails.host + ":" + string(connDetails.port)
-	fmt.Printf("Starting connection to server(%s)...\n", host_name)
-
-	conn, err := net.Dial("tcp", host_name)
+	pgConn := NewPgConnection(connDetails)
+	err := pgConn.Connect()
 	if err != nil {
-		fmt.Printf("Error while connection to server: %s", err)
-	}
-	defer conn.Close()
-
-	fmt.Printf("%s %s\n", conn.LocalAddr(), conn.RemoteAddr())
-
-	//write bytes to the remote server
-	err = send_startup_message(conn, connDetails.username, connDetails.database)
-	if err != nil {
-		fmt.Println(err)
 		panic(err)
 	}
+	defer pgConn.Close()
+	// host_name := connDetails.host + ":" + string(connDetails.port)
+	// fmt.Printf("Starting connection to server(%s)...\n", host_name)
 
-	//fmt.Println("Starting auth...")
-	//err = handleAuthentication(conn, username, password)
-	//if err != nil {
-	//	panic(err)
-	//}
+	// client := NewTCPClient(connDetails.host, connDetails.port)
+	// err := client.ConnectToServer()
+	// if err != nil {
+	// 	fmt.Printf("Error while connecting to server: %s\n", err)
+	// 	return
+	// }
 
-	fmt.Println("[Main] Starting waitForReady loop...")
-	waitForReady(conn)
+	// fmt.Printf("%s %s\n", client.conn.LocalAddr(), client.conn.RemoteAddr())
 
-	sendQuery(conn, query)
-	readQueryResponse(conn)
+	// writer := message.NewPgWriter(client.conn)
+	// // reader := message.NewPgReader(client.conn)
+
+	// //write bytes to the remote server
+	// err = send_startup_message(writer, connDetails.username, connDetails.database)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	panic(err)
+	// }
+
+	// //fmt.Println("Starting auth...")
+	// //err = handleAuthentication(conn, username, password)
+	// //if err != nil {
+	// //	panic(err)
+	// //}
+
+	// fmt.Println("[Main] Starting waitForReady loop...")
+	// waitForReady(client.conn)
+
+	// sendQuery(client.conn, query)
+	// readQueryResponse(client.conn)
 }
 
 func parseArguments() (ConnectionDetails, string) {
@@ -206,6 +216,7 @@ func sendQuery(conn net.Conn, query string) {
 
 // this ones should be broken into smaller pieces, probably per message type
 func waitForReady(conn net.Conn) {
+
 	for {
 		msgType := readByte(conn)
 		converted := string(msgType)
@@ -244,7 +255,7 @@ func waitForReady(conn net.Conn) {
 	}
 }
 
-func send_startup_message(conn net.Conn, user, db string) error {
+func send_startup_message(writer *message.PgWriter, user, db string) error {
 	buf := new(bytes.Buffer)
 	//protocol version number 3.0 - 196608
 	binary.Write(buf, binary.BigEndian, int32(196608))
@@ -265,11 +276,37 @@ func send_startup_message(conn net.Conn, user, db string) error {
 	binary.Write(final, binary.BigEndian, int32(len(msg)+4))
 	final.Write(msg)
 
-	response, err := conn.Write(final.Bytes())
-	fmt.Println("[StartUp] Server response: ")
-	fmt.Println(string(response))
+	_, err := writer.Write(final.Bytes())
+	// client.Send(final.Bytes())
 	return err
 }
+
+// func send_startup_message(conn net.Conn, user, db string) error {
+// 	buf := new(bytes.Buffer)
+// 	//protocol version number 3.0 - 196608
+// 	binary.Write(buf, binary.BigEndian, int32(196608))
+
+// 	writeCString(buf, "user")
+// 	writeCString(buf, user)
+
+// 	writeCString(buf, "database")
+// 	writeCString(buf, db)
+
+// 	writeCString(buf, "application_name")
+// 	writeCString(buf, "PgClient")
+
+// 	buf.WriteByte(0)
+
+// 	msg := buf.Bytes()
+// 	final := new(bytes.Buffer)
+// 	binary.Write(final, binary.BigEndian, int32(len(msg)+4))
+// 	final.Write(msg)
+
+// 	response, err := conn.Write(final.Bytes())
+// 	fmt.Println("[StartUp] Server response: ")
+// 	fmt.Println(string(response))
+// 	return err
+// }
 
 func readInt16(conn net.Conn) int16 {
 	var b [2]byte
