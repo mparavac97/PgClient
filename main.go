@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"pgclient/client"
 	"strings"
+	"time"
+
+	"pgclient/client"
 )
 
 const (
@@ -33,30 +35,26 @@ func main() {
 	defer pgConn.Close()
 
 	go func() {
-		err = pgConn.SendQuery("SELECT * FROM \"TestTable\";")
+		result, err := pgConn.ExecuteQuery("SELECT * FROM \"TestTable\";")
 		if err != nil {
 			panic(err)
 		}
-		fmt.Println(pgConn.TransactionStatus)
-
-		values2 := pgConn.ReadQueryResponse()
-		fmt.Println(len(values2), "rows received")
-		for _, value := range values2 {
+		for _, value := range result {
 			fmt.Println("Value:", value)
 		}
+		fmt.Println(pgConn.TransactionStatus)
 	}()
 
-	err = pgConn.SendQuery(query)
+	result, err := pgConn.ExecuteQuery(query)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(pgConn.TransactionStatus)
-
-	values := pgConn.ReadQueryResponse()
-	fmt.Println(len(values), "rows received")
-	for _, value := range values {
+	for _, value := range result {
 		fmt.Println("Value:", value)
 	}
+	fmt.Println(pgConn.TransactionStatus)
+
+	time.Sleep(5 * time.Second)
 }
 
 func parseArguments() (client.ConnectionDetails, string) {

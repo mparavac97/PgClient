@@ -4,8 +4,19 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+
 	"pgclient/message"
 )
+
+type QueryRequest struct {
+	query  string
+	result chan queryResult
+}
+
+type queryResult struct {
+	rows []map[string]any
+	err  error
+}
 
 type ConnectionDetails struct {
 	Host     string
@@ -32,16 +43,21 @@ type PgConnection struct {
 	client            *TCPClient
 	params            map[string]string
 	TransactionStatus string
+	queryQueue        chan QueryRequest
 }
 
 func NewPgConnection(details ConnectionDetails) *PgConnection {
 	client := NewTCPClient(details.Host, details.Port)
 
-	return &PgConnection{
-		details: details,
-		client:  client,
-		params:  make(map[string]string),
+	conn := &PgConnection{
+		details:    details,
+		client:     client,
+		params:     make(map[string]string),
+		queryQueue: make(chan QueryRequest, 100), // buffered channel to hold up to 100 queries
 	}
+
+	go conn.ProcessQueries()
+	return conn
 }
 
 func (conn *PgConnection) Connect() error {
@@ -62,7 +78,7 @@ func (conn *PgConnection) Connect() error {
 		return err
 	}
 
-	//wait for the server to respond with messages, until it sends ReadyForQuery
+	// wait for the server to respond with messages, until it sends ReadyForQuery
 	for {
 		msgType, err := conn.reader.ReadByte()
 		if err != nil {
@@ -110,24 +126,48 @@ func (conn *PgConnection) Close() error {
 	return nil
 }
 
-func (conn *PgConnection) SendQuery(query string) error {
-	buf := new(bytes.Buffer)
-	buf.WriteByte('Q')
+func (conn *PgConnection) ExecuteQuery(query string) ([]map[string]any, error) {
+	// Create a buffered channel for the query result
+	resultChan := make(chan queryResult, 1)
 
+	// Queue the query
+	conn.queryQueue <- QueryRequest{
+		query:  query,
+		result: resultChan,
+	}
+
+	// Wait for and process the result
+	result := <-resultChan
+	return result.rows, result.err
+}
+
+func (conn *PgConnection) sendQuery(query string, buf *bytes.Buffer) error {
+	buf.WriteByte('Q')
 	binary.Write(buf, binary.BigEndian, int32(len(query)+5))
 	conn.writer.WriteCString(buf, query)
 	fmt.Println("Sending query:", query)
 	_, err := conn.writer.Write(buf.Bytes())
-	if err != nil {
-		return fmt.Errorf("error writing query: %w", err)
-	}
+	return err
+}
 
-	return nil
+func (conn *PgConnection) ProcessQueries() {
+	for req := range conn.queryQueue {
+		buf := new(bytes.Buffer)
+		err := conn.sendQuery(req.query, buf)
+		if err != nil {
+			req.result <- queryResult{nil, err}
+			continue
+		}
+
+		// Read the response
+		rows := conn.readQueryResponse()
+		req.result <- queryResult{rows, nil}
+	}
 }
 
 func (conn *PgConnection) sendStartupMessage() error {
 	buf := new(bytes.Buffer)
-	//protocol version number 3.0 - 196608
+	// protocol version number 3.0 - 196608
 	binary.Write(buf, binary.BigEndian, int32(196608))
 
 	conn.writer.WriteCString(buf, "user")
@@ -154,7 +194,7 @@ func (conn *PgConnection) sendStartupMessage() error {
 	}
 }
 
-func (conn *PgConnection) ReadQueryResponse() []map[string]any {
+func (conn *PgConnection) readQueryResponse() []map[string]any {
 	fields := make([]RowDescription, 0)
 	rows := make([]map[string]any, 0)
 	for {
@@ -218,19 +258,19 @@ func (conn *PgConnection) ReadQueryResponse() []map[string]any {
 				} else {
 					var value any
 					if fields[i].formatCode == 0 {
-						//text format
+						// text format
 						valueBytes := conn.reader.ReadNBytes(int(valueLength))
 						value = string(valueBytes)
 					} else {
 						value = conn.reader.ReadNBytes(int(valueLength))
 					}
-					//need to know the column type to map the data returned by the server
+					// need to know the column type to map the data returned by the server
 					data[fields[i].fieldName] = value
 				}
 				i++
 			}
 			rows = append(rows, data)
-		case 'C':
+		case byte(message.CommandComplete):
 			commandTag, _ := conn.reader.ReadCString()
 			fmt.Printf("[ReadQueryResponse] Recevied following command tag: %s\n", commandTag)
 		case byte(message.ReadyForQuery):
@@ -242,7 +282,7 @@ func (conn *PgConnection) ReadQueryResponse() []map[string]any {
 			conn.TransactionStatus = status
 			return rows
 
-		case 'E':
+		case byte(message.ErrorResponse):
 			code, err := conn.reader.ReadByte()
 			if err != nil {
 				fmt.Println("error reading error code:", err)
@@ -250,48 +290,6 @@ func (conn *PgConnection) ReadQueryResponse() []map[string]any {
 			}
 			field, _ := conn.reader.ReadCString()
 			fmt.Printf("[ReadQueryResponse] Error: %s %s\n", string(code), field)
-		}
-	}
-}
-
-func WaitForReadyForQuery(conn *PgConnection) error {
-	//wait for the server to respond with messages, until it sends ReadyForQuery
-	for {
-		msgType, err := conn.reader.ReadByte()
-		if err != nil {
-			return fmt.Errorf("error reading message type: %w", err)
-		}
-		fmt.Println("Received message type:", string(msgType))
-		length, err := conn.reader.ReadInt32()
-		if err != nil {
-			return fmt.Errorf("error reading message type: %w", err)
-		}
-		fmt.Println(length, "bytes in message")
-
-		switch msgType {
-		case byte(message.ParameterStatus):
-			param, value, err := message.ProcessParameterStatus(conn.reader)
-			if err != nil {
-				return fmt.Errorf("error processing parameter status: %w", err)
-			}
-			conn.params[param] = value
-		case byte(message.BackendKeyData):
-			pid, key, err := message.ProcessBackendKeyData(conn.reader)
-			if err != nil {
-				return fmt.Errorf("error processing backend key data: %w", err)
-			}
-			conn.params["pid"] = fmt.Sprintf("%d", pid)
-			conn.params["key"] = fmt.Sprintf("%d", key)
-		case byte(message.ReadyForQuery):
-			status, err := message.ProcessReadyForQuery(conn.reader)
-			if err != nil {
-				return fmt.Errorf("error processing ready for query: %w", err)
-			}
-			conn.TransactionStatus = status
-			return nil
-		default:
-			conn.reader.SkipN(length - 4)
-			fmt.Println("Found default message type.")
 		}
 	}
 }
