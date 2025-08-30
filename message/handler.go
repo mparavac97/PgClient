@@ -1,5 +1,9 @@
 package message
 
+import (
+	"fmt"
+)
+
 type MessageType byte
 
 type ResponseHandler func(messageType MessageType, data []byte) (any, error)
@@ -28,17 +32,41 @@ const (
 
 func InitializeHandlers() map[byte]ResponseHandler {
 	handlers := make(map[byte]ResponseHandler)
-	handlers[byte(ParameterStatus)] = ProcessParameterStatus
 
 	return handlers
 }
 
-func ProcessMessageType(msgType MessageType) {
-
+func ProcessReadyForQuery(reader *PgReader) (string, error) {
+	status, err := reader.ReadByte()
+	if err != nil {
+		return "", fmt.Errorf("error reading ready for query status: %w", err)
+	}
+	return string(status), nil
 }
 
-func ProcessParameterStatus(msgType MessageType, data []byte) (any, error) {
-	params := make(map[string]string)
+func ProcessBackendKeyData(reader *PgReader) (int32, int32, error) {
+	pid, err := reader.ReadInt32()
+	if err != nil {
+		return 0, 0, fmt.Errorf("error reading backend key data: %w", err)
+	}
+	key, err := reader.ReadInt32()
+	if err != nil {
+		return 0, 0, fmt.Errorf("error reading process ID: %w", err)
+	}
 
-	return params, nil
+	return pid, key, nil
+}
+
+func ProcessParameterStatus(reader *PgReader) (string, string, error) {
+	param, err := reader.ReadCString()
+	if err != nil {
+		return "", "", fmt.Errorf("error reading parameter name: %w", err)
+	}
+
+	value, err := reader.ReadCString()
+	if err != nil {
+		return "", "", fmt.Errorf("error reading parameter value: %w", err)
+	}
+
+	return param, value, nil
 }

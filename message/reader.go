@@ -3,6 +3,7 @@ package message
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 )
 
@@ -65,4 +66,18 @@ func (r *PgReader) ReadCString() (string, error) {
 		buf.WriteByte(one[0])
 	}
 	return buf.String(), nil
+}
+
+func (conn *PgReader) ReadNBytes(n int) []byte {
+	b := make([]byte, n)
+	io.ReadFull(conn, b[:])
+	return b
+}
+
+func (reader *PgReader) SkipN(n int32) error {
+	_, err := io.CopyN(io.Discard, reader, int64(n))
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("error skiSpping %d bytes: %w", n, err)
+	}
+	return nil
 }

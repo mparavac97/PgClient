@@ -1,6 +1,9 @@
 package message
 
-import "io"
+import (
+	"bytes"
+	"io"
+)
 
 type PgWriter struct {
 	writer io.Writer
@@ -16,4 +19,9 @@ func (w *PgWriter) Write(p []byte) (n int, err error) {
 		return n, err
 	}
 	return n, nil
+}
+
+func (w *PgWriter) WriteCString(buf *bytes.Buffer, s string) {
+	buf.WriteString(s)
+	buf.WriteByte(0) // Null terminator
 }
