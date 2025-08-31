@@ -1,12 +1,9 @@
 package main
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"strings"
-	"time"
 
 	"pgclient/client"
 )
@@ -34,27 +31,16 @@ func main() {
 	}
 	defer pgConn.Close()
 
-	go func() {
-		result, err := pgConn.ExecuteQuery("SELECT * FROM \"TestTable\";")
-		if err != nil {
-			panic(err)
-		}
-		for _, value := range result {
-			fmt.Println("Value:", value)
-		}
-		fmt.Println(pgConn.TransactionStatus)
-	}()
-
-	result, err := pgConn.ExecuteQuery(query)
+	cmd := client.NewPgCommand("UPDATE \"TestTable\" SET \"Age\" = 55 WHERE \"Name\" = $1;", pgConn)
+	cmd.SetParameter("$1", "Sarah Wilson")
+	result, err := cmd.Execute()
 	if err != nil {
 		panic(err)
 	}
-	for _, value := range result {
+	for _, value := range result.Rows {
 		fmt.Println("Value:", value)
 	}
 	fmt.Println(pgConn.TransactionStatus)
-
-	time.Sleep(5 * time.Second)
 }
 
 func parseArguments() (client.ConnectionDetails, string) {
@@ -62,6 +48,16 @@ func parseArguments() (client.ConnectionDetails, string) {
 	query := flag.String("q", "", "SQL query to execute")
 	flag.Parse()
 	connDetails := parseConnectionString(*connStringArgument)
+	if connDetails == (client.ConnectionDetails{}) {
+		connDetails = client.ConnectionDetails{
+			Host:     host,
+			Port:     port,
+			Username: username,
+			Password: password,
+			Database: database,
+		}
+	}
+
 	fmt.Printf("%+v\n", connDetails)
 
 	return connDetails, *query
@@ -142,14 +138,14 @@ func parseConnectionString(connString string) client.ConnectionDetails {
 // 	conn.Write(packet.Bytes())
 // }
 
-func md5HashPassword(user, pass string, salt []byte) string {
-	h1 := md5.Sum([]byte(pass + user))
-	h1Hex := fmt.Sprintf("%x", h1[:])
+// func md5HashPassword(user, pass string, salt []byte) string {
+// 	h1 := md5.Sum([]byte(pass + user))
+// 	h1Hex := fmt.Sprintf("%x", h1[:])
 
-	h2 := md5.New()
-	h2.Write([]byte(h1Hex))
-	h2.Write(salt)
-	sum := h2.Sum(nil)
+// 	h2 := md5.New()
+// 	h2.Write([]byte(h1Hex))
+// 	h2.Write(salt)
+// 	sum := h2.Sum(nil)
 
-	return "md5" + hex.EncodeToString(sum)
-}
+// 	return "md5" + hex.EncodeToString(sum)
+// }

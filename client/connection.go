@@ -10,11 +10,12 @@ import (
 
 type QueryRequest struct {
 	query  string
-	result chan queryResult
+	params map[string]any
+	result chan QueryResult
 }
 
-type queryResult struct {
-	rows []map[string]any
+type QueryResult struct {
+	Rows []map[string]any
 	err  error
 }
 
@@ -41,10 +42,23 @@ type PgConnection struct {
 	writer            *message.PgWriter
 	reader            *message.PgReader
 	client            *TCPClient
-	params            map[string]string
+	connParams        map[string]string
 	TransactionStatus string
 	queryQueue        chan QueryRequest
 }
+
+const (
+	ErrorSeverity = 'S'
+	ErrorCode     = 'C'
+	ErrorMessage  = 'M'
+	ErrorDetail   = 'D'
+	ErrorHint     = 'H'
+	ErrorPosition = 'P'
+	ErrorWhere    = 'W'
+	ErrorFile     = 'F'
+	ErrorLine     = 'L'
+	ErrorRoutine  = 'R'
+)
 
 func NewPgConnection(details ConnectionDetails) *PgConnection {
 	client := NewTCPClient(details.Host, details.Port)
@@ -52,7 +66,7 @@ func NewPgConnection(details ConnectionDetails) *PgConnection {
 	conn := &PgConnection{
 		details:    details,
 		client:     client,
-		params:     make(map[string]string),
+		connParams: make(map[string]string),
 		queryQueue: make(chan QueryRequest, 100), // buffered channel to hold up to 100 queries
 	}
 
@@ -89,7 +103,6 @@ func (conn *PgConnection) Connect() error {
 		if err != nil {
 			return fmt.Errorf("error reading message type: %w", err)
 		}
-		fmt.Println(length, "bytes in message")
 
 		switch msgType {
 		case byte(message.ParameterStatus):
@@ -97,14 +110,14 @@ func (conn *PgConnection) Connect() error {
 			if err != nil {
 				return fmt.Errorf("error processing parameter status: %w", err)
 			}
-			conn.params[param] = value
+			conn.connParams[param] = value
 		case byte(message.BackendKeyData):
 			pid, key, err := message.ProcessBackendKeyData(conn.reader)
 			if err != nil {
 				return fmt.Errorf("error processing backend key data: %w", err)
 			}
-			conn.params["pid"] = fmt.Sprintf("%d", pid)
-			conn.params["key"] = fmt.Sprintf("%d", key)
+			conn.connParams["pid"] = fmt.Sprintf("%d", pid)
+			conn.connParams["key"] = fmt.Sprintf("%d", key)
 		case byte(message.ReadyForQuery):
 			status, err := message.ProcessReadyForQuery(conn.reader)
 			if err != nil {
@@ -126,42 +139,114 @@ func (conn *PgConnection) Close() error {
 	return nil
 }
 
-func (conn *PgConnection) ExecuteQuery(query string) ([]map[string]any, error) {
-	// Create a buffered channel for the query result
-	resultChan := make(chan queryResult, 1)
+// func (conn *PgConnection) ExecuteQuery(query string) ([]map[string]any, error) {
+// 	// Create a buffered channel for the query result
+// 	resultChan := make(chan QueryResult, 1)
 
-	// Queue the query
-	conn.queryQueue <- QueryRequest{
-		query:  query,
-		result: resultChan,
+// 	// Queue the query
+// 	conn.queryQueue <- QueryRequest{
+// 		query:  query,
+// 		result: resultChan,
+// 	}
+
+// 	// Wait for and process the result
+// 	result := <-resultChan
+// 	return result.rows, result.err
+// }
+
+func (conn *PgConnection) sendQuery(query string, params map[string]any) error {
+	buf := new(bytes.Buffer)
+	if len(params) == 0 {
+		buf.WriteByte(byte(message.Query))
+		binary.Write(buf, binary.BigEndian, int32(len(query)+5))
+		conn.writer.WriteCString(buf, query)
+		fmt.Println("Sending query:", query)
+		_, err := conn.writer.Write(buf.Bytes())
+		return err
+	} else {
+		// extended query protocol
+		// 1. Parse message
+		parseBuf := new(bytes.Buffer)
+		conn.writer.WriteCString(parseBuf, "")                       // unnamed statement
+		conn.writer.WriteCString(parseBuf, query)                    // query string
+		binary.Write(parseBuf, binary.BigEndian, int16(len(params))) // number of parameter types
+		for range params {
+			binary.Write(parseBuf, binary.BigEndian, int32(0)) // parameter type OID (0 = unspecified)
+		}
+
+		// Write Parse message header
+		buf.WriteByte('P')                                           // Parse message type
+		binary.Write(buf, binary.BigEndian, int32(parseBuf.Len()+4)) // message length including itself
+		buf.Write(parseBuf.Bytes())
+
+		// _, err := conn.writer.Write(buf.Bytes())
+		// if err != nil {
+		// 	return err
+		// }
+
+		// 2. Describe message - describes the prepared statement
+		buf.WriteByte('D') // Describe message type
+		describeBuf := new(bytes.Buffer)
+		describeBuf.WriteByte('S')                // Describe a prepared statement ('S'), not a portal ('P')
+		conn.writer.WriteCString(describeBuf, "") // unnamed statement
+		binary.Write(buf, binary.BigEndian, int32(describeBuf.Len()+4))
+		buf.Write(describeBuf.Bytes())
+
+		// 3. Bind
+		buf.WriteByte('B')
+		bindInner := new(bytes.Buffer)
+		conn.writer.WriteCString(bindInner, "") // unnamed portal
+		conn.writer.WriteCString(bindInner, "") // unnamed prepared statement
+
+		// Format codes for parameters (use text format)
+		binary.Write(bindInner, binary.BigEndian, int16(len(params)))
+		for range params {
+			binary.Write(bindInner, binary.BigEndian, int16(0))
+		}
+
+		// Parameter values
+		binary.Write(bindInner, binary.BigEndian, int16(len(params)))
+		for _, param := range params {
+			paramStr := fmt.Sprintf("%v", param)
+			binary.Write(bindInner, binary.BigEndian, int32(len(paramStr)))
+			bindInner.WriteString(paramStr)
+		}
+
+		// Result format codes (use text format for all)
+		binary.Write(bindInner, binary.BigEndian, int16(0))
+
+		binary.Write(buf, binary.BigEndian, int32(bindInner.Len()+4))
+		buf.Write(bindInner.Bytes())
+
+		// 4. Execute
+		buf.WriteByte('E')
+		binary.Write(buf, binary.BigEndian, int32(9)) // message length
+		conn.writer.WriteCString(buf, "")             // unnamed portal
+		binary.Write(buf, binary.BigEndian, int32(0)) // unlimited rows
+
+		// 5. Sync
+		buf.WriteByte('S')
+		binary.Write(buf, binary.BigEndian, int32(4))
+
+		_, err := conn.writer.Write(buf.Bytes())
+		if err != nil {
+			return fmt.Errorf("error writing messages: %w", err)
+		}
+		return nil
 	}
-
-	// Wait for and process the result
-	result := <-resultChan
-	return result.rows, result.err
-}
-
-func (conn *PgConnection) sendQuery(query string, buf *bytes.Buffer) error {
-	buf.WriteByte('Q')
-	binary.Write(buf, binary.BigEndian, int32(len(query)+5))
-	conn.writer.WriteCString(buf, query)
-	fmt.Println("Sending query:", query)
-	_, err := conn.writer.Write(buf.Bytes())
-	return err
 }
 
 func (conn *PgConnection) ProcessQueries() {
 	for req := range conn.queryQueue {
-		buf := new(bytes.Buffer)
-		err := conn.sendQuery(req.query, buf)
+		err := conn.sendQuery(req.query, req.params)
 		if err != nil {
-			req.result <- queryResult{nil, err}
+			req.result <- QueryResult{nil, err}
 			continue
 		}
 
 		// Read the response
 		rows := conn.readQueryResponse()
-		req.result <- queryResult{rows, nil}
+		req.result <- QueryResult{rows, nil}
 	}
 }
 
@@ -204,22 +289,33 @@ func (conn *PgConnection) readQueryResponse() []map[string]any {
 			return nil
 		}
 		fmt.Printf("[ReadQueryResponse] Received message of type: %s\n", string(msgType))
-		length, err := conn.reader.ReadInt32()
+		_, err = conn.reader.ReadInt32()
 		if err != nil {
 			fmt.Println("error reading message length:", err)
 			return nil
 		}
-
-		fmt.Printf("[ReadQueryResponse] Length of the message: %d\n", length)
 		switch msgType {
+		case byte(message.ParameterDescription):
+			paramCount, err := conn.reader.ReadInt16()
+			if err != nil {
+				fmt.Println("error reading parameter count:", err)
+				return nil
+			}
+			// Read parameter type OIDs
+			for i := 0; i < int(paramCount); i++ {
+				oid, err := conn.reader.ReadInt32() // parameter type OID
+				if err != nil {
+					fmt.Println("error reading parameter type:", err)
+					return nil
+				}
+				fmt.Println("Parameter", i, "type OID:", oid)
+			}
 		case byte(message.RowDescription):
-			fmt.Printf("[ReadQueryResponse] Recevied RowDescription message.\n")
 			noOfFields, err := conn.reader.ReadInt16()
 			if err != nil {
 				fmt.Println("error reading no of fields:", err)
 				return nil
 			}
-			fmt.Printf("no of fileds: %d\n\n\n", noOfFields)
 
 			i := 0
 			for i < int(noOfFields) {
@@ -237,7 +333,6 @@ func (conn *PgConnection) readQueryResponse() []map[string]any {
 				fields = append(fields, *row)
 				i++
 			}
-			fmt.Println(fields)
 		case byte(message.DataRow):
 			noOfFields, err := conn.reader.ReadInt16()
 			if err != nil {
@@ -273,6 +368,10 @@ func (conn *PgConnection) readQueryResponse() []map[string]any {
 		case byte(message.CommandComplete):
 			commandTag, _ := conn.reader.ReadCString()
 			fmt.Printf("[ReadQueryResponse] Recevied following command tag: %s\n", commandTag)
+		case byte(message.ParseComplete):
+			fmt.Println("Parse complete")
+		case byte(message.BindComplete):
+			fmt.Println("Bind complete")
 		case byte(message.ReadyForQuery):
 			status, err := message.ProcessReadyForQuery(conn.reader)
 			if err != nil {
@@ -283,13 +382,41 @@ func (conn *PgConnection) readQueryResponse() []map[string]any {
 			return rows
 
 		case byte(message.ErrorResponse):
-			code, err := conn.reader.ReadByte()
-			if err != nil {
-				fmt.Println("error reading error code:", err)
-				return nil
+			errorFields := make(map[byte]string)
+
+			for {
+				// Read field type
+				fieldType, err := conn.reader.ReadByte()
+				if err != nil {
+					fmt.Println("error reading field type:", err)
+					return nil
+				}
+
+				// Check for message terminator
+				if fieldType == 0 {
+					break
+				}
+
+				// Read field value
+				fieldValue, err := conn.reader.ReadCString()
+				if err != nil {
+					fmt.Println("error reading field value:", err)
+					return nil
+				}
+
+				errorFields[fieldType] = fieldValue
 			}
-			field, _ := conn.reader.ReadCString()
-			fmt.Printf("[ReadQueryResponse] Error: %s %s\n", string(code), field)
+
+			// Log the complete error
+			fmt.Printf("[ReadQueryResponse] PostgreSQL Error:\n")
+			fmt.Printf("Severity: %s\n", errorFields[ErrorSeverity])
+			fmt.Printf("Code: %s\n", errorFields[ErrorCode])
+			fmt.Printf("Message: %s\n", errorFields[ErrorMessage])
+			if detail, ok := errorFields[ErrorDetail]; ok {
+				fmt.Printf("Detail: %s\n", detail)
+			}
+
+			return nil
 		}
 	}
 }

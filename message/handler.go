@@ -28,6 +28,8 @@ const (
 	PortalSuspended      MessageType = 's'
 	ReadyForQuery        MessageType = 'Z'
 	RowDescription       MessageType = 'T'
+	Query                MessageType = 'Q'
+	Parse                MessageType = 'P'
 )
 
 func InitializeHandlers() map[byte]ResponseHandler {
