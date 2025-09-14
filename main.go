@@ -3,28 +3,26 @@ package main
 import (
 	"flag"
 	"fmt"
-	"strings"
 
 	"pgclient/client"
 )
 
 const (
-	host     = "192.168.0.25"
-	port     = "5433"
-	username = "mislavclient"
-	database = "postgres"
-	password = "postgres"
+	host       = "192.168.0.25"
+	port       = "5433"
+	username   = "mislavclient"
+	database   = "postgres"
+	password   = "postgres"
+	connString = "Host=192.168.0.25;Port=5433;Database=postgres;Username=mislavclient;Password=postgres;"
 )
 
-// Host=192.168.0.25;Port=5433;Database=postgres;Username=mislavclient;Password=postgres;
-
 func main() {
-	connDetails, _ := parseArguments()
+	query := parseArguments()
 	// query := "explain analyze SELECT * FROM \"TestTable\";"
-	query := "insert into \"TestTable\" (\"Id\", \"Name\", \"Age\") values (gen_random_uuid(), 'Jane Doe', 99);"
+	query = "insert into \"TestTable\" (\"Id\", \"Name\", \"Age\") values (gen_random_uuid(), 'Jane Doe', 99);"
 	fmt.Println("Query to execute:", query)
 
-	pgConn := client.NewPgConnection(connDetails)
+	pgConn := client.NewPgConnection(connString)
 	err := pgConn.Connect()
 	if err != nil {
 		panic(err)
@@ -43,57 +41,11 @@ func main() {
 	fmt.Println(pgConn.TransactionStatus)
 }
 
-func parseArguments() (client.ConnectionDetails, string) {
-	connStringArgument := flag.String("c", "", "Connection string")
+func parseArguments() string {
 	query := flag.String("q", "", "SQL query to execute")
 	flag.Parse()
-	connDetails := parseConnectionString(*connStringArgument)
-	if connDetails == (client.ConnectionDetails{}) {
-		connDetails = client.ConnectionDetails{
-			Host:     host,
-			Port:     port,
-			Username: username,
-			Password: password,
-			Database: database,
-		}
-	}
 
-	fmt.Printf("%+v\n", connDetails)
-
-	return connDetails, *query
-}
-
-func parseConnectionString(connString string) client.ConnectionDetails {
-	fmt.Println(connString)
-	split := strings.Split(connString, ";")
-	fmt.Println(split)
-	details := client.ConnectionDetails{}
-
-	assignMap := map[string]*string{
-		"host":     &details.Host,
-		"port":     &details.Port,
-		"username": &details.Username,
-		"password": &details.Password,
-		"database": &details.Database,
-	}
-
-	for _, part := range split {
-		if part == "" {
-			continue
-		}
-		item := strings.SplitN(part, "=", 2)
-		if len(item) != 2 {
-			panic(fmt.Errorf("there was an issue parsing %s", item[0]))
-		}
-		key := strings.ToLower(strings.TrimSpace(item[0]))
-		value := strings.TrimSpace(item[1])
-
-		if ptr, ok := assignMap[key]; ok {
-			*ptr = value
-		}
-	}
-
-	return details
+	return *query
 }
 
 // func handleAuthentication(conn net.Conn, user, pass string) error {

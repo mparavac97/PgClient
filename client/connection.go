@@ -2,8 +2,12 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
 
 	"pgclient/message"
 )
@@ -20,11 +24,12 @@ type QueryResult struct {
 }
 
 type ConnectionDetails struct {
-	Host     string
-	Port     string
-	Username string
-	Password string
-	Database string
+	Host              string
+	Port              string
+	Username          string
+	Password          string
+	Database          string
+	ConnectionTimeout string // in seconds
 }
 
 type RowDescription struct {
@@ -60,7 +65,8 @@ const (
 	ErrorRoutine  = 'R'
 )
 
-func NewPgConnection(details ConnectionDetails) *PgConnection {
+func NewPgConnection(connectionString string) *PgConnection {
+	details := parseConnectionString(connectionString)
 	client := NewTCPClient(details.Host, details.Port)
 
 	conn := &PgConnection{
@@ -76,59 +82,97 @@ func NewPgConnection(details ConnectionDetails) *PgConnection {
 
 func (conn *PgConnection) Connect() error {
 	fmt.Println("Connecting to server...")
-	err := conn.client.ConnectToServer()
-	if err != nil {
-		return err
+
+	// Create a context with timeout or use background context for no timeout
+	var ctx context.Context
+	var cancel context.CancelFunc
+
+	timeout, err := strconv.Atoi(conn.details.ConnectionTimeout)
+	if err != nil || timeout <= 0 {
+		// Use background context with no timeout
+		ctx = context.Background()
+		cancel = func() {} // Empty cancel function
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	}
+	defer cancel()
 
-	// Initialize writer and reader AFTER the connection exists
-	conn.writer = message.NewPgWriter(conn.client.conn)
-	conn.reader = message.NewPgReader(conn.client.conn)
+	done := make(chan error, 1)
 
-	fmt.Println("Connected to server.")
-	fmt.Println("Sending startup message...")
-	err = conn.sendStartupMessage()
-	if err != nil {
+	// Start connection process in goroutine
+	go func() {
+		if err := conn.client.ConnectToServer(ctx); err != nil {
+			done <- err
+			return
+		}
+
+		// Initialize writer and reader AFTER the connection exists
+		conn.writer = message.NewPgWriter(conn.client.conn)
+		conn.reader = message.NewPgReader(conn.client.conn)
+
+		fmt.Println("Connected to server.")
+		fmt.Println("Sending startup message...")
+		if err = conn.sendStartupMessage(); err != nil {
+			done <- err
+			return
+		}
+		time.Sleep(5 * time.Second) // simulate processing time
+		// Handle server messages until ReadyForQuery
+		for {
+			msgType, err := conn.reader.ReadByte()
+			if err != nil {
+				done <- fmt.Errorf("error reading message type: %w", err)
+				return
+			}
+			fmt.Println("Received message type:", message.MessageType(msgType).String())
+			length, err := conn.reader.ReadInt32()
+			if err != nil {
+				done <- fmt.Errorf("error reading message type: %w", err)
+				return
+			}
+
+			switch msgType {
+			case byte(message.ParameterStatus):
+				param, value, err := message.ProcessParameterStatus(conn.reader)
+				if err != nil {
+					done <- fmt.Errorf("error processing parameter status: %w", err)
+					return
+				}
+				conn.connParams[param] = value
+			case byte(message.BackendKeyData):
+				pid, key, err := message.ProcessBackendKeyData(conn.reader)
+				if err != nil {
+					done <- fmt.Errorf("error processing backend key data: %w", err)
+					return
+				}
+				conn.connParams["pid"] = fmt.Sprintf("%d", pid)
+				conn.connParams["key"] = fmt.Sprintf("%d", key)
+			case byte(message.ReadyForQuery):
+				status, err := message.ProcessReadyForQuery(conn.reader)
+				if err != nil {
+					done <- fmt.Errorf("error processing ready for query: %w", err)
+					return
+				}
+				conn.TransactionStatus = status
+				done <- nil
+				return
+			default:
+				conn.reader.SkipN(length - 4)
+				fmt.Println("Found default message type.")
+			}
+		}
+	}()
+
+	// Wait for either completion or timeout
+	select {
+	case err := <-done:
 		return err
-	}
-
-	// wait for the server to respond with messages, until it sends ReadyForQuery
-	for {
-		msgType, err := conn.reader.ReadByte()
-		if err != nil {
-			return fmt.Errorf("error reading message type: %w", err)
+	case <-ctx.Done():
+		// Clean up connection if it exists
+		if conn.client != nil {
+			conn.client.Close()
 		}
-		fmt.Println("Received message type:", string(msgType))
-		length, err := conn.reader.ReadInt32()
-		if err != nil {
-			return fmt.Errorf("error reading message type: %w", err)
-		}
-
-		switch msgType {
-		case byte(message.ParameterStatus):
-			param, value, err := message.ProcessParameterStatus(conn.reader)
-			if err != nil {
-				return fmt.Errorf("error processing parameter status: %w", err)
-			}
-			conn.connParams[param] = value
-		case byte(message.BackendKeyData):
-			pid, key, err := message.ProcessBackendKeyData(conn.reader)
-			if err != nil {
-				return fmt.Errorf("error processing backend key data: %w", err)
-			}
-			conn.connParams["pid"] = fmt.Sprintf("%d", pid)
-			conn.connParams["key"] = fmt.Sprintf("%d", key)
-		case byte(message.ReadyForQuery):
-			status, err := message.ProcessReadyForQuery(conn.reader)
-			if err != nil {
-				return fmt.Errorf("error processing ready for query: %w", err)
-			}
-			conn.TransactionStatus = status
-			return nil
-		default:
-			conn.reader.SkipN(length - 4)
-			fmt.Println("Found default message type.")
-		}
+		return fmt.Errorf("connection timeout after %d seconds", timeout)
 	}
 }
 
@@ -138,21 +182,6 @@ func (conn *PgConnection) Close() error {
 	}
 	return nil
 }
-
-// func (conn *PgConnection) ExecuteQuery(query string) ([]map[string]any, error) {
-// 	// Create a buffered channel for the query result
-// 	resultChan := make(chan QueryResult, 1)
-
-// 	// Queue the query
-// 	conn.queryQueue <- QueryRequest{
-// 		query:  query,
-// 		result: resultChan,
-// 	}
-
-// 	// Wait for and process the result
-// 	result := <-resultChan
-// 	return result.rows, result.err
-// }
 
 func (conn *PgConnection) sendQuery(query string, params map[string]any) error {
 	buf := new(bytes.Buffer)
@@ -279,6 +308,40 @@ func (conn *PgConnection) sendStartupMessage() error {
 	}
 }
 
+func parseConnectionString(connString string) ConnectionDetails {
+	fmt.Println(connString)
+	split := strings.Split(connString, ";")
+	fmt.Println(split)
+	details := ConnectionDetails{}
+
+	assignMap := map[string]*string{
+		"host":              &details.Host,
+		"port":              &details.Port,
+		"username":          &details.Username,
+		"password":          &details.Password,
+		"database":          &details.Database,
+		"connectiontimeout": &details.ConnectionTimeout,
+	}
+
+	for _, part := range split {
+		if part == "" {
+			continue
+		}
+		item := strings.SplitN(part, "=", 2)
+		if len(item) != 2 {
+			panic(fmt.Errorf("there was an issue parsing %s", item[0]))
+		}
+		key := strings.ToLower(strings.TrimSpace(item[0]))
+		value := strings.TrimSpace(item[1])
+
+		if ptr, ok := assignMap[key]; ok {
+			*ptr = value
+		}
+	}
+
+	return details
+}
+
 func (conn *PgConnection) readQueryResponse() []map[string]any {
 	fields := make([]RowDescription, 0)
 	rows := make([]map[string]any, 0)
@@ -288,7 +351,7 @@ func (conn *PgConnection) readQueryResponse() []map[string]any {
 			fmt.Println("error reading message type:", err)
 			return nil
 		}
-		fmt.Printf("[ReadQueryResponse] Received message of type: %s\n", string(msgType))
+		fmt.Printf("[ReadQueryResponse] Received message of type: %s\n", message.MessageType(msgType).String())
 		_, err = conn.reader.ReadInt32()
 		if err != nil {
 			fmt.Println("error reading message length:", err)

@@ -1,14 +1,15 @@
 package client
 
 import (
+	"context"
 	"net"
+	"time"
 )
 
 type TCPClient struct {
 	conn net.Conn
 	host string
 	port string
-	//timeout time.Duration
 }
 
 func NewTCPClient(host, port string) *TCPClient {
@@ -18,13 +19,32 @@ func NewTCPClient(host, port string) *TCPClient {
 	}
 }
 
-func (client *TCPClient) ConnectToServer() error {
-	conn, err := net.Dial("tcp", client.host+":"+client.port)
+func (client *TCPClient) ConnectToServer(ctx context.Context) error {
+	// Get timeout from context if set
+	var timeout time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+	}
+
+	// Create dialer with or without timeout
+	dialer := net.Dialer{}
+	if timeout > 0 {
+		dialer.Timeout = timeout
+	}
+
+	// Use context for overall operation timeout
+	conn, err := dialer.DialContext(ctx, "tcp", client.host+":"+client.port)
 	if err != nil {
 		return err
 	}
+
 	client.conn = conn
-	//defer client.conn.Close()
+
+	// Set read/write deadlines only if timeout is specified
+	if deadline, ok := ctx.Deadline(); ok {
+		client.conn.SetDeadline(deadline)
+	}
+
 	return nil
 }
 

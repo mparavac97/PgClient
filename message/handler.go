@@ -72,3 +72,50 @@ func ProcessParameterStatus(reader *PgReader) (string, string, error) {
 
 	return param, value, nil
 }
+
+func (mt MessageType) String() string {
+	switch mt {
+	case AuthenticationOK:
+		return "AuthenticationOK"
+	case BackendKeyData:
+		return "BackendKeyData"
+	case BindComplete:
+		return "BindComplete"
+	case CloseComplete:
+		return "CloseComplete"
+	case CommandComplete:
+		return "CommandComplete"
+	case DataRow:
+		return "DataRow"
+	case EmptyQueryResponse:
+		return "EmptyQueryResponse"
+	case ErrorResponse:
+		return "ErrorResponse"
+	case FunctionCallResponse:
+		return "FunctionCallResponse"
+	case NoData:
+		return "NoData"
+	case NoticeResponse:
+		return "NoticeResponse"
+	case NotificationResponse:
+		return "NotificationResponse"
+	case ParameterDescription:
+		return "ParameterDescription"
+	case ParameterStatus:
+		return "ParameterStatus"
+	case ParseComplete:
+		return "ParseComplete"
+	case PortalSuspended:
+		return "PortalSuspended"
+	case ReadyForQuery:
+		return "ReadyForQuery"
+	case RowDescription:
+		return "RowDescription"
+	case Query:
+		return "Query"
+	case Parse:
+		return "Parse"
+	default:
+		return fmt.Sprintf("Unknown(%c)", mt)
+	}
+}
