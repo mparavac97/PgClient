@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 
-	"pgclient/client"
+	"github.com/mparavac97/PgClient/pkg/client"
 )
 
 const (
