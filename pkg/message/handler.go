@@ -38,6 +38,33 @@ func InitializeHandlers() map[byte]ResponseHandler {
 	return handlers
 }
 
+func ProcessErrorResponse(reader *PgReader, length int32) (map[byte]string, error) {
+    fields := make(map[byte]string)
+    bytesRemaining := length - 4 // length includes itself
+
+    for bytesRemaining > 0 {
+        fieldType, err := reader.ReadByte()
+        if err != nil {
+            return nil, fmt.Errorf("error reading error field type: %w", err)
+        }
+
+        // Terminator
+        if fieldType == 0 {
+            break
+        }
+
+        str, err := reader.ReadCString()
+        if err != nil {
+            return nil, fmt.Errorf("error reading error field string: %w", err)
+        }
+
+        fields[fieldType] = str
+        bytesRemaining -= int32(1 + len(str) + 1)
+    }
+
+    return fields, nil
+}
+
 func ProcessReadyForQuery(reader *PgReader) (string, error) {
 	status, err := reader.ReadByte()
 	if err != nil {

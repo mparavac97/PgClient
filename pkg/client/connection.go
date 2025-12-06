@@ -156,6 +156,12 @@ func (conn *PgConnection) Connect() error {
 				conn.TransactionStatus = status
 				done <- nil
 				return
+			case byte(message.ErrorResponse):
+				errResponse, err := message.ProcessErrorResponse(conn.reader, length)
+				if err != nil {
+					done <- fmt.Errorf("error processing error response: %w", err)
+				}
+				fmt.Println("server returned error response: ", errResponse)
 			default:
 				conn.reader.SkipN(length - 4)
 				fmt.Println("Found default message type.")
@@ -443,7 +449,37 @@ func (conn *PgConnection) readQueryResponse() []map[string]any {
 			}
 			conn.TransactionStatus = status
 			return rows
+		case byte(message.NoticeResponse):
+    	for {
+        	code, err := conn.reader.ReadByte()
+        	if err != nil {
+            	fmt.Println("error reading NoticeResponse field code:", err)
+	            return nil
+    	    }
+        	if code == 0 {
+            	// end of message
+            	break
+        	}
 
+	        value, err := conn.reader.ReadCString()
+    	    if err != nil {
+        	    fmt.Println("error reading NoticeResponse CString:", err)
+            	return nil
+	        }
+
+	        fmt.Printf("NoticeResponse field: %c => %s\n", code, value)
+    	}
+		case byte(message.FunctionCallResponse):
+			fmt.Println("FunctionCallResponse - starting length read.")
+			funcResponseLength, err := conn.reader.ReadInt32()
+			if err != nil {
+				fmt.Println("error processing FunctionCallResponse: ", err)
+				return nil
+			}
+			fmt.Println("FunctionCallResponse - length value: ", funcResponseLength)
+			fmt.Println("FunctionCallResponse - starting function result read.")
+			x := conn.reader.ReadNBytes(int(funcResponseLength))
+			fmt.Println("FunctionCallResponse: ", string(x))
 		case byte(message.ErrorResponse):
 			errorFields := make(map[byte]string)
 
