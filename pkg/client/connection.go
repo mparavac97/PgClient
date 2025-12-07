@@ -13,9 +13,10 @@ import (
 )
 
 type QueryRequest struct {
-	query  string
-	params map[string]any
-	result chan QueryResult
+	query      string
+	params     map[string]any
+	paramNames []string
+	result     chan QueryResult
 }
 
 type QueryResult struct {
@@ -189,7 +190,7 @@ func (conn *PgConnection) Close() error {
 	return nil
 }
 
-func (conn *PgConnection) sendQuery(query string, params map[string]any) error {
+func (conn *PgConnection) sendQuery(query string, params map[string]any, paramNames []string) error {
 	buf := new(bytes.Buffer)
 	if len(params) == 0 {
 		buf.WriteByte(byte(message.Query))
@@ -241,8 +242,8 @@ func (conn *PgConnection) sendQuery(query string, params map[string]any) error {
 
 		// Parameter values
 		binary.Write(bindInner, binary.BigEndian, int16(len(params)))
-		for _, param := range params {
-			paramStr := fmt.Sprintf("%v", param)
+		for _, param := range paramNames {
+			paramStr := fmt.Sprintf("%v", params[param])
 			binary.Write(bindInner, binary.BigEndian, int32(len(paramStr)))
 			bindInner.WriteString(paramStr)
 		}
@@ -273,7 +274,7 @@ func (conn *PgConnection) sendQuery(query string, params map[string]any) error {
 
 func (conn *PgConnection) ProcessQueries() {
 	for req := range conn.queryQueue {
-		err := conn.sendQuery(req.query, req.params)
+		err := conn.sendQuery(req.query, req.params, req.paramNames)
 		if err != nil {
 			req.result <- QueryResult{nil, err}
 			continue
@@ -283,6 +284,7 @@ func (conn *PgConnection) ProcessQueries() {
 		rows := conn.readQueryResponse()
 		req.result <- QueryResult{rows, nil}
 	}
+	fmt.Println(time.Now(), "")
 }
 
 func (conn *PgConnection) sendStartupMessage() error {
@@ -450,25 +452,25 @@ func (conn *PgConnection) readQueryResponse() []map[string]any {
 			conn.TransactionStatus = status
 			return rows
 		case byte(message.NoticeResponse):
-    	for {
-        	code, err := conn.reader.ReadByte()
-        	if err != nil {
-            	fmt.Println("error reading NoticeResponse field code:", err)
-	            return nil
-    	    }
-        	if code == 0 {
-            	// end of message
-            	break
-        	}
+			for {
+				code, err := conn.reader.ReadByte()
+				if err != nil {
+					fmt.Println("error reading NoticeResponse field code:", err)
+					return nil
+				}
+				if code == 0 {
+					// end of message
+					break
+				}
 
-	        value, err := conn.reader.ReadCString()
-    	    if err != nil {
-        	    fmt.Println("error reading NoticeResponse CString:", err)
-            	return nil
-	        }
+				value, err := conn.reader.ReadCString()
+				if err != nil {
+					fmt.Println("error reading NoticeResponse CString:", err)
+					return nil
+				}
 
-	        fmt.Printf("NoticeResponse field: %c => %s\n", code, value)
-    	}
+				fmt.Printf("NoticeResponse field: %c => %s\n", code, value)
+			}
 		case byte(message.FunctionCallResponse):
 			fmt.Println("FunctionCallResponse - starting length read.")
 			funcResponseLength, err := conn.reader.ReadInt32()

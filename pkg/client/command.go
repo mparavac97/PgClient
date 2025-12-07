@@ -1,11 +1,10 @@
 package client
 
-import "fmt"
-
 type PgCommand struct {
 	connection  *PgConnection
 	commandText string
 	params      map[string]any
+	paramNames  []string
 }
 
 func NewPgCommand(commandText string, conn *PgConnection) *PgCommand {
@@ -13,6 +12,7 @@ func NewPgCommand(commandText string, conn *PgConnection) *PgCommand {
 		connection:  conn,
 		commandText: commandText,
 		params:      make(map[string]any),
+		paramNames:  make([]string, 0),
 	}
 }
 
@@ -21,17 +21,18 @@ func (cmd *PgCommand) SetParameter(name string, value any) {
 		cmd.params = make(map[string]any)
 	}
 	cmd.params[name] = value
+	cmd.paramNames = append(cmd.paramNames, name)
 }
 
 func (cmd *PgCommand) Execute() (*QueryResult, error) {
 	// Create a buffered channel for the query result
 	resultChan := make(chan QueryResult, 1)
-	fmt.Println("[Execute] Command to execute: ", cmd.commandText)
 	// Queue the query
 	cmd.connection.queryQueue <- QueryRequest{
-		query:  cmd.commandText,
-		result: resultChan,
-		params: cmd.params,
+		query:      cmd.commandText,
+		result:     resultChan,
+		params:     cmd.params,
+		paramNames: cmd.paramNames,
 	}
 
 	// Wait for and process the result
