@@ -284,7 +284,6 @@ func (conn *PgConnection) ProcessQueries() {
 		rows := conn.readQueryResponse()
 		req.result <- QueryResult{rows, nil}
 	}
-	fmt.Println(time.Now(), "")
 }
 
 func (conn *PgConnection) sendStartupMessage() error {
