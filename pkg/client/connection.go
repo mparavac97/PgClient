@@ -117,7 +117,7 @@ func (conn *PgConnection) Connect() error {
 			done <- err
 			return
 		}
-		time.Sleep(5 * time.Second) // simulate processing time
+
 		// Handle server messages until ReadyForQuery
 		for {
 			msgType, err := conn.reader.ReadByte()
